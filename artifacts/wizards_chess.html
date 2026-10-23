@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Wizards Chess 3D</title>
+<style>
+  body { margin: 0; overflow: hidden; background: #0a0a1a; font-family: 'Georgia', serif; }
+  #info {
+    position: absolute; top: 10px; left: 10px; color: #e0d0a0; background: rgba(0,0,0,0.6);
+    padding: 12px 16px; border-radius: 8px; border: 1px solid #8b7355; max-width: 320px;
+    font-size: 14px; line-height: 1.4; pointer-events: none; z-index: 10;
+  }
+  #controls {
+    position: absolute; bottom: 10px; left: 10px; z-index: 10;
+  }
+  button {
+    background: #4a3a2a; color: #e0d0a0; border: 1px solid #8b7355; padding: 8px 16px;
+    border-radius: 4px; cursor: pointer; font-family: 'Georgia', serif; margin-right: 8px;
+  }
+  button:hover { background: #5a4a3a; }
+  #canvas-container { width: 100vw; height: 100vh; }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+</head>
+<body>
+<div id="info">
+  <strong>Wizards Chess</strong><br>
+  Magical battle of strategy.<br>
+  Click a piece of your color, then a highlighted square to move.<br>
+  Captures trigger animated combat!<br>
+  Drag to orbit, scroll to zoom.
+</div>
+<div id="controls">
+  <button id="resetBtn">New Game</button>
+  <button id="flipBtn">Flip Board</button>
+</div>
+<div id="canvas-container"></div>
+
+<script>
+const container = document.getElementById('canvas-container');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a1a);
+scene.fog = new THREE.Fog(0x0a0a1a, 15, 40);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(0, 12, 10);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+container.appendChild(renderer.domElement);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.minDistance = 6;
+controls.maxDistance = 25;
+controls.maxPolarAngle = Math.PI / 2.1;
+controls.target.set(0, 0, 0);
+
+// Lights
+const ambient = new THREE.AmbientLight(0x404060, 0.6);
+scene.add(ambient);
+const dirLight = new THREE.DirectionalLight(0xfff0d0, 1.2);
+dirLight.position.set(5, 15, 8);
+dirLight.castShadow = true;
+dirLight.shadow.mapSize.width = 2048;
+dirLight.shadow.mapSize.height = 2048;
+scene.add(dirLight);
+const magicLight1 = new THREE.PointLight(0x8866ff, 0.4, 20);
+magicLight1.position.set(-4, 3, -4);
+scene.add(magicLight1);
+const magicLight2 = new THREE.PointLight(0xffaa44, 0.3, 20);
+magicLight2.position.set(4, 3, 4);
+scene.add(magicLight2);
+
+// Board
+const boardGroup = new THREE.Group();
+const squareMeshes = [];
+const squareSize = 1;
+for (let file = 0; file < 8; file++) {
+  for (let rank = 0; rank < 8; rank++) {
+    const geom = new THREE.BoxGeometry(squareSize, 0.15, squareSize);
+    const isLight = (file + rank) % 2 === 0;
+    const color = isLight ? 0xc8b896 : 0x3a2a1a;
+    const mat = new THREE.MeshLambertMaterial({ color });
+    const square = new THREE.Mesh(geom, mat);
+    square.position.set(file - 3.5, -0.075, rank - 3.5);
+    square.receiveShadow = true;
+    square.userData = { file, rank, isSquare: true };
+    boardGroup.add(square);
+    squareMeshes.push(square);
+  }
+}
+// Board border
+const borderGeom = new THREE.BoxGeometry(8.6, 0.3, 8.6);
+const borderMat = new THREE.MeshLambertMaterial({ color: 0x2a1a0a });
+const border = new THREE.Mesh(borderGeom, borderMat);
+border.position.y = -0.2;
+border.receiveShadow = true;
+boardGroup.add(border);
+scene.add(boardGroup);
+
+// Chess logic
+let game = new Chess();
+let pieceMeshes = {}; // square -> mesh group
+let selectedPiece = null;
+let highlightMeshes = [];
+let isAnimating = false;
+let whiteAtBottom = true;
+
+function squareToCoords(sq) {
+  const file = sq.charCodeAt(0) - 97; // a=0
+  const rank = parseInt(sq[1]) - 1;   // 1=0 ... 8=7
+  // White rank 1 at positive z (near default camera)
+  return { x: file - 3.5, z: 3.5 - rank };
+}
+
+function coordsToSquare(file, rankMesh) {
+  // rankMesh 0 is at z = 0-3.5 = -3.5 which should be chess rank 8
+  // After position fix: wait, better recompute from z later if needed
+  // For now, since squares are positioned with their userData.rank as chess rank?
+  // Let's fix square placement too.
+  return String.fromCharCode(97 + file) + (8 - rankMesh);
+}
+
+function createPiece(type, color) {
+  const group = new THREE.Group();
+  const isWhite = color === 'w';
+  const mat = new THREE.MeshPhongMaterial({
+    color: isWhite ? 0xf5e6c8 : 0x2a1a3a,
+    shininess: 40,
+    specular: isWhite ? 0x888866 : 0x442266,
+    emissive: isWhite ? 0x221100 : 0x110022,
+    emissiveIntensity: 0.15
+  });
+  const accentMat = new THREE.MeshPhongMaterial({
+    color: isWhite ? 0xddaa44 : 0x6644aa,
+    shininess: 60,
+    emissive: isWhite ? 0x332200 : 0x221144,
+    emissiveIntensity: 0.3
+  });
+
+  // Base
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.36, 0.12, 16), mat);
+  base.position.y = 0.06;
+  base.castShadow = true;
+  group.add(base);
+
+  if (type === 'p') {
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.22, 0.45, 12), mat);
+    body.position.y = 0.32;
+    body.castShadow = true;
+    group.add(body);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 12, 12), mat);
+    head.position.y = 0.62;
+    head.castShadow = true;
+    group.add(head);
+    // Wizard hat for pawns
+    const hat = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.28, 8), accentMat);
+    hat.position.y = 0.85;
+    group.add(hat);
+  } else if (type === 'r') {
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.26, 0.7, 8), mat);
+    body.position.y = 0.45;
+    body.castShadow = true;
+    group.add(body);
+    // Crenellations
+    for (let i = 0; i < 4; i++) {
+      const cren = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.18, 0.12), accentMat);
+      const ang = (i / 4) * Math.PI * 2;
+      cren.position.set(Math.cos(ang) * 0.2, 0.88, Math.sin(ang) * 0.2);
+      group.add(cren);
+    }
+  } else if (type === 'n') {
+    // Knight as horse-like
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.5, 0.4), mat);
+    body.position.y = 0.4;
+    body.castShadow = true;
+    group.add(body);
+    const neck = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.35, 0.22), mat);
+    neck.position.set(0.12, 0.65, 0);
+    neck.rotation.z = -0.4;
+    neck.castShadow = true;
+    group.add(neck);
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.22, 0.28), mat);
+    head.position.set(0.28, 0.78, 0);
+    head.castShadow = true;
+    group.add(head);
+    // Wizard staff accent
+    const staff = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.6, 6), accentMat);
+    staff.position.set(-0.15, 0.7, 0);
+    group.add(staff);
+  } else if (type === 'b') {
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.24, 0.75, 12), mat);
+    body.position.y = 0.48;
+    body.castShadow = true;
+    group.add(body);
+    const mitre = new THREE.Mesh(new THREE.ConeGeometry(0.2, 0.35, 8), accentMat);
+    mitre.position.y = 0.95;
+    group.add(mitre);
+    // Cross
+    const crossV = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.22, 0.06), accentMat);
+    crossV.position.y = 1.2;
+    group.add(crossV);
+  } else if (type === 'q') {
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.28, 0.9, 12), mat);
+    body.position.y = 0.55;
+    body.castShadow = true;
+    group.add(body);
+    const crown = new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 12), accentMat);
+    crown.position.y = 1.1;
+    group.add(crown);
+    // Crown points
+    for (let i = 0; i < 5; i++) {
+      const point = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.18, 6), accentMat);
+      const ang = (i / 5) * Math.PI * 2;
+      point.position.set(Math.cos(ang) * 0.18, 1.25, Math.sin(ang) * 0.18);
+      group.add(point);
+    }
+  } else if (type === 'k') {
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.28, 1.0, 12), mat);
+    body.position.y = 0.6;
+    body.castShadow = true;
+    group.add(body);
+    const crown = new THREE.Mesh(new THREE.SphereGeometry(0.2, 12, 12), accentMat);
+    crown.position.y = 1.2;
+    group.add(crown);
+    // Cross
+    const crossV = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.35, 0.08), accentMat);
+    crossV.position.y = 1.45;
+    group.add(crossV);
+    const crossH = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.08, 0.08), accentMat);
+    crossH.position.y = 1.55;
+    group.add(crossH);
+  }
+
+  group.userData = { type, color, isPiece: true };
+  group.traverse(c => { if (c.isMesh) c.castShadow = true; });
+  return group;
+}
+
+function clearPieces() {
+  for (const sq in pieceMeshes) {
+    scene.remove(pieceMeshes[sq]);
+  }
+  pieceMeshes = {};
+}
+
+function placePieces() {
+  clearPieces();
+  const board = game.board();
+  for (let r = 0; r < 8; r++) {
+    for (let f = 0; f < 8; f++) {
+      const piece = board[r][f];
+      if (piece) {
+        const sq = String.fromCharCode(97 + f) + (8 - r);
+        const mesh = createPiece(piece.type, piece.color);
+        const coords = squareToCoords(sq);
+        mesh.position.set(coords.x, 0, coords.z);
+        mesh.userData.square = sq;
+        scene.add(mesh);
+        pieceMeshes[sq] = mesh;
+      }
+    }
+  }
+}
+
+function clearHighlights() {
+  highlightMeshes.forEach(m => scene.remove(m));
+  highlightMeshes = [];
+}
+
+function highlightMoves(square) {
+  clearHighlights();
+  const moves = game.moves({ square, verbose: true });
+  moves.forEach(move => {
+    const coords = squareToCoords(move.to);
+    const geom = new THREE.RingGeometry(0.25, 0.4, 16);
+    const mat = new THREE.MeshBasicMaterial({
+      color: move.captured ? 0xff4444 : 0x44ff88,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.7
+    });
+    const ring = new THREE.Mesh(geom, mat);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.set(coords.x, 0.08, coords.z);
+    scene.add(ring);
+    highlightMeshes.push(ring);
+  });
+}
+
+function updateStatus() {
+  const info = document.getElementById('info');
+  let status = '';
+  if (game.in_checkmate()) {
+    status = (game.turn() === 'w' ? 'Black' : 'White') + ' wins by checkmate!';
+  } else if (game.in_draw()) {
+    status = 'Game drawn.';
+  } else {
+    status = (game.turn() === 'w' ? 'White' : 'Black') + "'s turn";
+    if (game.in_check()) status += ' — CHECK!';
+  }
+  info.innerHTML = `<strong>Wizards Chess</strong><br>${status}<br><br>Click piece → highlighted square.<br>Captures animate magical combat.<br>Drag to orbit • Scroll to zoom.`;
+}
+
+function createParticles(pos, color) {
+  const count = 40;
+  const geom = new THREE.BufferGeometry();
+  const positions = new Float32Array(count * 3);
+  const velocities = [];
+  for (let i = 0; i < count; i++) {
+    positions[i*3] = pos.x + (Math.random()-0.5)*0.3;
+    positions[i*3+1] = pos.y + 0.4 + Math.random()*0.3;
+    positions[i*3+2] = pos.z + (Math.random()-0.5)*0.3;
+    velocities.push(new THREE.Vector3(
+      (Math.random()-0.5)*0.15,
+      Math.random()*0.2 + 0.05,
+      (Math.random()-0.5)*0.15
+    ));
+  }
+  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  const mat = new THREE.PointsMaterial({ color, size: 0.08, transparent: true, opacity: 1 });
+  const points = new THREE.Points(geom, mat);
+  points.userData.velocities = velocities;
+  points.userData.life = 1.0;
+  scene.add(points);
+  return points;
+}
+
+function animateCapture(attacker, victim, onComplete) {
+  isAnimating = true;
+  const startPos = attacker.position.clone();
+  const targetPos = victim.position.clone();
+  const mid = startPos.clone().lerp(targetPos, 0.5).add(new THREE.Vector3(0, 0.8, 0));
+  let t = 0;
+  const duration = 60; // frames ~1s
+  const particles = [];
+
+  function step() {
+    t++;
+    const prog = Math.min(t / duration, 1);
+    // Attacker's path: arc
+    const p1 = startPos.clone().lerp(mid, Math.min(prog * 1.5, 1));
+    const p2 = mid.clone().lerp(targetPos, Math.max((prog - 0.4) / 0.6, 0));
+    attacker.position.copy(prog < 0.5 ? p1 : p2);
+    attacker.rotation.y += 0.15;
+
+    if (prog > 0.6 && particles.length < 3) {
+      particles.push(createParticles(victim.position, attacker.userData.color === 'w' ? 0xffdd88 : 0xaa66ff));
+    }
+
+    // Victim shake then fall
+    if (prog > 0.7) {
+      victim.position.y = Math.max(0, 0.3 - (prog - 0.7) * 2);
+      victim.rotation.x += 0.1;
+      victim.scale.setScalar(Math.max(0.1, 1 - (prog - 0.7) * 2));
+    }
+
+    particles.forEach(p => {
+      const pos = p.geometry.attributes.position;
+      for (let i = 0; i < p.userData.velocities.length; i++) {
+        pos.array[i*3] += p.userData.velocities[i].x;
+        pos.array[i*3+1] += p.userData.velocities[i].y;
+        pos.array[i*3+2] += p.userData.velocities[i].z;
+        p.userData.velocities[i].y -= 0.008;
+      }
+      pos.needsUpdate = true;
+      p.userData.life -= 0.015;
+      p.material.opacity = Math.max(0, p.userData.life);
+    });
+
+    if (prog < 1) {
+      requestAnimationFrame(step);
+    } else {
+      scene.remove(victim);
+      particles.forEach(p => scene.remove(p));
+      attacker.position.copy(targetPos);
+      attacker.rotation.set(0, 0, 0);
+      isAnimating = false;
+      if (onComplete) onComplete();
+    }
+  }
+  step();
+}
+
+function animateMove(mesh, toSquare, onComplete) {
+  isAnimating = true;
+  const start = mesh.position.clone();
+  const end = squareToCoords(toSquare);
+  end.y = 0;
+  let t = 0;
+  const duration = 25;
+  function step() {
+    t++;
+    const prog = Math.min(t / duration, 1);
+    mesh.position.lerpVectors(start, end, prog);
+    mesh.position.y = Math.sin(prog * Math.PI) * 0.4;
+    if (prog < 1) {
+      requestAnimationFrame(step);
+    } else {
+      mesh.position.copy(end);
+      isAnimating = false;
+      if (onComplete) onComplete();
+    }
+  }
+  step();
+}
+
+function makeMove(from, to) {
+  const move = game.move({ from, to, promotion: 'q' });
+  if (!move) return false;
+
+  const attacker = pieceMeshes[from];
+  let victimSquare = to;
+  if (move.flags.includes('e')) {
+    // En passant: captured pawn is behind the to square
+    const file = to.charCodeAt(0) - 97;
+    const rank = parseInt(to[1]);
+    victimSquare = String.fromCharCode(97 + file) + (move.color === 'w' ? rank - 1 : rank + 1);
+  }
+  const victim = pieceMeshes[victimSquare];
+  delete pieceMeshes[from];
+  if (victim) delete pieceMeshes[victimSquare];
+
+  attacker.userData.square = to;
+  pieceMeshes[to] = attacker;
+
+  const needsFullReplace = move.flags.includes('k') || move.flags.includes('q') || move.promotion || move.flags.includes('e');
+
+  if (move.captured) {
+    animateCapture(attacker, victim, () => {
+      if (needsFullReplace) placePieces();
+      updateStatus();
+    });
+  } else {
+    animateMove(attacker, to, () => {
+      if (needsFullReplace) placePieces();
+      updateStatus();
+    });
+  }
+  clearHighlights();
+  selectedPiece = null;
+  return true;
+}
+
+// Interaction
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+
+function onPointerDown(event) {
+  if (isAnimating) return;
+  mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+
+  const intersects = raycaster.intersectObjects(scene.children, true);
+  if (intersects.length === 0) return;
+
+  let hit = intersects[0].object;
+  while (hit && !hit.userData.isPiece && !hit.userData.isSquare) {
+    hit = hit.parent;
+  }
+  if (!hit) return;
+
+  if (hit.userData.isPiece) {
+    const sq = hit.userData.square;
+    const piece = game.get(sq);
+    if (piece && piece.color === game.turn()) {
+      selectedPiece = hit;
+      highlightMoves(sq);
+    }
+  } else if (hit.userData.isSquare && selectedPiece) {
+    const file = hit.userData.file;
+    const rank = hit.userData.rank;
+    const to = coordsToSquare(file, rank);
+    const from = selectedPiece.userData.square;
+    makeMove(from, to);
+  }
+}
+
+renderer.domElement.addEventListener('pointerdown', onPointerDown);
+
+document.getElementById('resetBtn').addEventListener('click', () => {
+  game = new Chess();
+  selectedPiece = null;
+  clearHighlights();
+  placePieces();
+  updateStatus();
+});
+
+document.getElementById('flipBtn').addEventListener('click', () => {
+  whiteAtBottom = !whiteAtBottom;
+  camera.position.z = whiteAtBottom ? 10 : -10;
+  controls.target.set(0, 0, 0);
+  controls.update();
+});
+
+// Initial setup
+placePieces();
+updateStatus();
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>
